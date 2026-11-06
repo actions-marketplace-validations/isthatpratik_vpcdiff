@@ -40,9 +40,46 @@ AWS VPC Reachability Analyzer, which needs a live account and checks one path at
 | Batfish | General network config analysis, supports AWS JSON snapshots | Reads `describe_*` output, not plans; heavy server |
 | Checkov, Trivy, Regula | Rules over plan JSON | Each rule judged alone, no paths |
 | inframap | Graph of resources and SG links | Draws links, does not evaluate reachability |
-| breadth, tf-analyze | Graph and exposure analysis from Terraform | Early stage; NACL and route semantics not documented |
+| breadth | Behavior graph of a whole repo (code, traces, Terraform); graph diff per PR | Network edges come from SG ingress rules only; NACLs, route tables, IGW/NAT, and egress are not evaluated |
+| tf-analyze | 215 rules over HCL or plan JSON, plus an attack graph from internet to "crown jewels" | Exposure is regex and flag based (`0.0.0.0/0`, `publicly_accessible`); no NACL or route evaluation; diff mode narrows files, it does not diff paths |
 
-TODO: read the source of `breadth` and `tf-analyze` and update this table.
+### Notes from reading the source (2026-11-06)
+
+**breadth** (`theorjiugovictor/breadth`, TypeScript, MIT, commit `20444b7`):
+
+- `collectors/src/infra/terraform.ts` reads `.tf`, state, or plan JSON
+  (`planned_values` and `resource_changes`).
+- It turns SG ingress rules (`aws_security_group` inline, `aws_security_group_rule`,
+  `aws_vpc_security_group_ingress_rule`) into `network` edges from a CIDR node
+  or a source SG to the workloads that use the group.
+- NACL rule resources are matched as rules but never become edges.
+  `aws_route_table*`, `aws_internet_gateway`, and `aws_nat_gateway` are graph
+  nodes only. Egress rules are skipped.
+- "Reachable from the internet" (`insights/src/rules/infra-posture.ts`) means:
+  an SG edge from `0.0.0.0/0` or `::/0` reaches the node. It does not check that
+  the subnet routes to an IGW or that a NACL allows the traffic.
+- The plan is used for create, update, delete, and replace actions, for example
+  "replacing orders-db loses data". It is not used for path outage risk.
+
+**tf-analyze** (`ChrisAdkin8/tf-analyze`, Python, Apache-2.0, commit `2161ce6`):
+
+- `scripts/_network.py` reduces SG, Azure NSG, and GCP firewall resources to
+  inbound allow rules `(sources, port range)` and flags world-open ones. Egress
+  is ignored. There are no deny rules, because AWS SGs have none.
+- `scripts/_attack_graph.py` builds the graph from HCL text with regexes.
+  A node is internet-reachable when its body matches a pattern, for example
+  `cidr_blocks = [... "0.0.0.0/0"]` or `publicly_accessible = true`.
+  Reachability spreads only through `vpc_security_group_ids` references.
+- Route tables and NACLs appear only in a module-reuse rule
+  (`catalog/MOD-REUSE-AWS-VPC-001.yaml`), not in any reachability logic.
+- `--mode plan` runs the rule catalog over `planned_values`. `--mode diff`
+  uses `git diff` to choose which files to scan. Neither compares before and
+  after reachability.
+
+**Conclusion:** neither tool models the full hop sequence (SG, NACL, route
+table, IGW/NAT) or gives a before/after path diff with the deciding rule at each
+hop. The vpcdiff scope in section 2 stays as it is. breadth is the closest in
+intent (behavior diff on a PR), so re-check it before major decisions.
 
 ### Background reading
 

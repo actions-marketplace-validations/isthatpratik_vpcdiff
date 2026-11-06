@@ -67,6 +67,8 @@ export interface Endpoint {
   securityGroups: Known<SecurityGroup[]>;
   nacl: Known<Nacl>;
   routeTable: Known<RouteTable>;
+  /** For endpoints with several possible subnets: why placements can differ. */
+  placement?: string;
 }
 
 // Resource types that change network behavior but are not modeled yet. A hop that one of
@@ -685,76 +687,207 @@ export class ModelBuilder {
     return known(this.routeTable(main.value[0] ?? `default-rt:${vpc.address}`, vpc, true));
   }
 
-  /** EC2 instances as endpoints. */
+  /**
+   * Endpoints, one entry per possible placement. An EC2 instance has one subnet. RDS and
+   * load balancers have several; the analysis compares the results of all placements.
+   */
   endpoints(): Endpoint[] {
-    return this.ofType("aws_instance").map((r) => this.instance(r));
+    return [
+      ...this.ofType("aws_instance").map((r) => this.instance(r)),
+      ...this.ofType("aws_db_instance").flatMap((r) => this.dbInstance(r)),
+      ...this.ofType("aws_lb").flatMap((r) => this.loadBalancer(r)),
+    ];
+  }
+
+  private fail(r: Resource, reason: string): Endpoint {
+    return { address: r.address, type: r.type, vpc: unknown(reason), subnet: unknown(reason), publicIp: unknown(reason), securityGroups: unknown(reason), nacl: unknown(reason), routeTable: unknown(reason) };
+  }
+
+  /** An endpoint for `r` placed in `subnet`. */
+  private place(r: Resource, subnet: string, publicIp: (s: Resource) => Known<string | undefined>, groups: (vpc: string) => Known<SecurityGroup[]>, placement?: string): Endpoint {
+    const s = this.get(subnet);
+    if (!s) return this.fail(r, `${subnet} is not in this plan`);
+    const vpcRef = this.refTo(s, "vpc_id", "aws_vpc");
+    if (!vpcRef.ok) return this.fail(r, vpcRef.reason);
+    const vpc = this.vpc(vpcRef.value);
+    if (!vpc.ok) return this.fail(r, vpc.reason);
+    return {
+      address: r.address,
+      type: r.type,
+      vpc,
+      subnet: known(subnet),
+      publicIp: publicIp(s),
+      securityGroups: groups(vpcRef.value),
+      nacl: this.subnetNacl(subnet, vpcRef.value),
+      routeTable: this.subnetRouteTable(subnet, vpc.value),
+      ...(placement ? { placement } : {}),
+    };
+  }
+
+  /**
+   * Security groups listed in `attr`. An empty list means the VPC's default group.
+   * https://docs.aws.amazon.com/vpc/latest/userguide/default-security-group.html
+   */
+  private groups(r: Resource, attr: string, vpc: string, emptyMeansDefault = true): Known<SecurityGroup[]> | "empty" {
+    const v = r.values[attr];
+    if (isNull(r, attr) || (Array.isArray(v) && !v.length && !isUnknown(r, [attr]))) {
+      return emptyMeansDefault ? known([this.securityGroup(`default-sg:${vpc}`)]) : "empty";
+    }
+    const keys: Key[] = [];
+    for (const ref of resolveRefs(this.snap, r, attr, ["aws_security_group", "aws_default_security_group"])) {
+      if (ref.kind === "unknown") return unknown(ref.reason);
+      if (ref.kind === "external") {
+        if (this.get(vpc)?.values.default_security_group_id !== ref.id) return unknown(`${r.address}: security group ${ref.id} is not managed in this plan`);
+        keys.push(`default-sg:${vpc}`);
+      } else {
+        const k = this.canonical(ref.address);
+        if (!k.ok) return unknown(k.reason);
+        keys.push(k.value);
+      }
+    }
+    return known([...new Set(keys)].toSorted(cmp).map((k) => this.securityGroup(k)));
   }
 
   private instance(r: Resource): Endpoint {
-    const fail = (reason: string): Endpoint => ({ address: r.address, type: r.type, vpc: unknown(reason), subnet: unknown(reason), publicIp: unknown(reason), securityGroups: unknown(reason), nacl: unknown(reason), routeTable: unknown(reason) });
     const touched = this.touched(r.address, UNMODELED_INSTANCE);
-    if (touched) return fail(touched);
-    if (arr(r.values.network_interface).length) return fail(`${r.address}: network_interface blocks are not modeled yet`);
+    if (touched) return this.fail(r, touched);
+    if (arr(r.values.network_interface).length) return this.fail(r, `${r.address}: network_interface blocks are not modeled yet`);
     const subnet = this.refTo(r, "subnet_id", "aws_subnet");
-    if (!subnet.ok) return fail(subnet.reason);
-    const s = this.get(subnet.value) as Resource;
-    const vpcRef = this.refTo(s, "vpc_id", "aws_vpc");
-    if (!vpcRef.ok) return fail(vpcRef.reason);
-    const vpc = this.vpc(vpcRef.value);
-    if (!vpc.ok) return fail(vpc.reason);
+    if (!subnet.ok) return this.fail(r, subnet.reason);
 
     // A public IPv4 address comes from an Elastic IP, from associate_public_ip_address,
     // or from the subnet's map_public_ip_on_launch.
     // https://docs.aws.amazon.com/vpc/latest/userguide/vpc-ip-addressing.html
     // https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/elastic-ip-addresses-eip.html
-    let publicIp: Known<string | undefined>;
-    const eips = this.eips.get(r.address);
-    const assoc = r.values.associate_public_ip_address;
-    if (eips.ok && eips.value.length) publicIp = known(`${eips.value.toSorted(cmp).join(", ")} is associated with ${r.address}`);
-    else if (isUnknown(r, ["associate_public_ip_address"]) && r.configured.has("associate_public_ip_address")) {
-      publicIp = unknown(`${r.address}: associate_public_ip_address is set to a value that is unknown until apply`);
-    } else if (!isUnknown(r, ["associate_public_ip_address"]) && typeof assoc === "boolean") {
-      publicIp = known(assoc ? `${r.address} associate_public_ip_address = true` : undefined);
-    } else if (!isUnknown(s, ["map_public_ip_on_launch"]) && typeof s.values.map_public_ip_on_launch === "boolean") {
-      publicIp = known(s.values.map_public_ip_on_launch ? `${s.address} map_public_ip_on_launch = true` : undefined);
-    } else {
-      publicIp = unknown(`${r.address}: whether it gets a public IPv4 address is unknown until apply`);
-    }
-    if (!eips.ok && !(publicIp.ok && publicIp.value)) publicIp = unknown(eips.reason);
+    const publicIp = (s: Resource): Known<string | undefined> => {
+      let out: Known<string | undefined>;
+      const eips = this.eips.get(r.address);
+      const assoc = r.values.associate_public_ip_address;
+      if (eips.ok && eips.value.length) out = known(`${eips.value.toSorted(cmp).join(", ")} is associated with ${r.address}`);
+      else if (isUnknown(r, ["associate_public_ip_address"]) && r.configured.has("associate_public_ip_address")) {
+        out = unknown(`${r.address}: associate_public_ip_address is set to a value that is unknown until apply`);
+      } else if (!isUnknown(r, ["associate_public_ip_address"]) && typeof assoc === "boolean") {
+        out = known(assoc ? `${r.address} associate_public_ip_address = true` : undefined);
+      } else if (!isUnknown(s, ["map_public_ip_on_launch"]) && typeof s.values.map_public_ip_on_launch === "boolean") {
+        out = known(s.values.map_public_ip_on_launch ? `${s.address} map_public_ip_on_launch = true` : undefined);
+      } else {
+        out = unknown(`${r.address}: whether it gets a public IPv4 address is unknown until apply`);
+      }
+      if (!eips.ok && !(out.ok && out.value)) out = unknown(eips.reason);
+      return out;
+    };
+    return this.place(r, subnet.value, publicIp, (vpc) => {
+      const g = this.groups(r, "vpc_security_group_ids", vpc);
+      return g === "empty" ? known([]) : g;
+    });
+  }
 
-    // Without security groups, an instance gets the VPC's default security group.
-    // https://docs.aws.amazon.com/vpc/latest/userguide/default-security-group.html
-    let securityGroups: Known<SecurityGroup[]>;
-    const keys: Key[] = [];
-    let sgReason: string | undefined;
-    if (isNull(r, "vpc_security_group_ids") || (Array.isArray(r.values.vpc_security_group_ids) && !r.values.vpc_security_group_ids.length && !isUnknown(r, ["vpc_security_group_ids"]))) {
-      keys.push(`default-sg:${vpcRef.value}`);
-    } else {
-      for (const ref of resolveRefs(this.snap, r, "vpc_security_group_ids", ["aws_security_group", "aws_default_security_group"])) {
-        if (ref.kind === "unknown") sgReason ??= ref.reason;
-        else if (ref.kind === "external") {
-          const vpcDefault = this.get(vpcRef.value)?.values.default_security_group_id === ref.id;
-          if (vpcDefault) keys.push(`default-sg:${vpcRef.value}`);
-          else sgReason ??= `${r.address}: security group ${ref.id} is not managed in this plan`;
-        } else {
-          const k = this.canonical(ref.address);
-          if (k.ok) keys.push(k.value);
-          else sgReason ??= k.reason;
-        }
+  /**
+   * RDS: the DB instance gets a public address only when publicly_accessible is true, and
+   * "Amazon RDS chooses a subnet and an IP address within that subnet group".
+   * https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_VPC.WorkingWithRDSInstanceinaVPC.html
+   */
+  private dbInstance(r: Resource): Endpoint[] {
+    let subnets: Known<string[]>;
+    const groupName = r.values.db_subnet_group_name;
+    if (isNull(r, "db_subnet_group_name")) subnets = unknown(`${r.address} uses the default DB subnet group, which is not in this plan`);
+    else {
+      let group: Resource | undefined;
+      if (!isUnknown(r, ["db_subnet_group_name"]) && typeof groupName === "string") group = this.ofType("aws_db_subnet_group").find((g) => g.values.name === groupName);
+      else if (!r.otherRefs.has("db_subnet_group_name")) {
+        const refs = fromConfig(this.snap, r, "db_subnet_group_name", "aws_db_subnet_group");
+        if (refs.length === 1 && refs[0]?.kind === "resource") group = this.get(refs[0].address);
+      }
+      if (!group) subnets = unknown(`${r.address}: its DB subnet group is not in this plan`);
+      else {
+        const refs = resolveRefs(this.snap, group, "subnet_ids", "aws_subnet");
+        const bad = refs.find((x) => x.kind !== "resource");
+        subnets = bad ? unknown(bad.kind === "unknown" ? bad.reason : `${group.address}: a subnet is not managed in this plan`) : known(refs.map((x) => (x as { address: string }).address));
       }
     }
-    if (sgReason) securityGroups = unknown(sgReason);
-    else securityGroups = known([...new Set(keys)].toSorted(cmp).map((k) => this.securityGroup(k)));
+    const pa = r.values.publicly_accessible;
+    const publicIp = (): Known<string | undefined> =>
+      isUnknown(r, ["publicly_accessible"]) ? unknown(`${r.address}: publicly_accessible is unknown until apply`) : known(pa === true ? `${r.address} publicly_accessible = true` : undefined);
+    if (!subnets.ok || !subnets.value.length) {
+      const reason = subnets.ok ? `${r.address}: its DB subnet group has no subnets` : subnets.reason;
+      // A DB instance known to be private is blocked at the public IP hop wherever it is.
+      const ip = publicIp();
+      return [ip.ok && !ip.value ? { ...this.fail(r, reason), publicIp: ip } : this.fail(r, reason)];
+    }
+    return subnets.value.map((sub) =>
+      this.place(r, sub, publicIp, (vpc) => {
+        const g = this.groups(r, "vpc_security_group_ids", vpc);
+        return g === "empty" ? known([]) : g;
+      }, "the result depends on the subnet that RDS chooses from the DB subnet group"),
+    );
+  }
 
-    return {
-      address: r.address,
-      type: r.type,
-      vpc,
-      subnet,
-      publicIp,
-      securityGroups,
-      nacl: this.subnetNacl(subnet.value, vpcRef.value),
-      routeTable: this.subnetRouteTable(subnet.value, vpc.value),
+  /**
+   * Load balancers: internet-facing when internal = false, with a node in each subnet.
+   * A Network Load Balancer without security groups lets "all client traffic reach the
+   * Network Load Balancer listeners", so its listener ports act as the allow rules.
+   * https://docs.aws.amazon.com/elasticloadbalancing/latest/application/application-load-balancers.html
+   * https://docs.aws.amazon.com/elasticloadbalancing/latest/network/load-balancer-security-groups.html
+   */
+  private loadBalancer(r: Resource): Endpoint[] {
+    // Subnets come from `subnets` or `subnet_mapping`; when both are known and disagree,
+    // the plan may hold stale state for one of them.
+    const fromSubnets = (): Known<string[]> => {
+      const refs = resolveRefs(this.snap, r, "subnets", "aws_subnet");
+      const bad = refs.find((x) => x.kind !== "resource");
+      return bad ? unknown(bad.kind === "unknown" ? bad.reason : `${r.address}: a subnet is not managed in this plan`) : known(refs.map((x) => (x as { address: string }).address).toSorted(cmp));
     };
+    const mappings = arr(r.values.subnet_mapping);
+    let subnets: Known<string[]>;
+    if (mappings.length) {
+      const ids = mappings.map((m) => (isObj(m) ? m.subnet_id : undefined));
+      const all = ids.every((id) => typeof id === "string") ? ids.map((id) => this.snap.byId.get(id as string)) : [];
+      subnets = all.length === ids.length && all.every(Boolean) ? known((all as string[]).toSorted(cmp)) : unknown(`${r.address}: subnet_mapping is unknown until apply or outside this plan`);
+      const listed = arr(r.values.subnets).length || isUnknown(r, ["subnets"]) ? fromSubnets() : undefined;
+      if (subnets.ok && listed && (!listed.ok || listed.value.join() !== subnets.value.join())) subnets = unknown(`${r.address}: subnets and subnet_mapping disagree`);
+    } else subnets = fromSubnets();
+    if (!subnets.ok) return [this.fail(r, subnets.reason)];
+    if (!subnets.value.length) return [this.fail(r, `${r.address} has no subnets in this plan`)];
+
+    // The type decides what an empty security group list means, so it must be known.
+    // Unset, the provider's default is "application".
+    if (isUnknown(r, ["load_balancer_type"]) && r.configured.has("load_balancer_type")) return [this.fail(r, `${r.address}: load_balancer_type is unknown until apply`)];
+    const type = isUnknown(r, ["load_balancer_type"]) ? "application" : String(r.values.load_balancer_type ?? "application");
+
+    // Internet-facing (internal = false) gives each node a public IPv4 address, except
+    // with ip_address_type "dualstack-without-public-ipv4".
+    // https://docs.aws.amazon.com/elasticloadbalancing/latest/application/application-load-balancers.html
+    const publicIp = (): Known<string | undefined> => {
+      if (isUnknown(r, ["internal"])) return unknown(`${r.address}: internal is unknown until apply`);
+      if (r.values.internal === true) return known(undefined);
+      if (isUnknown(r, ["ip_address_type"]) && r.configured.has("ip_address_type")) return unknown(`${r.address}: ip_address_type is unknown until apply`);
+      const ipType = isUnknown(r, ["ip_address_type"]) ? "ipv4" : String(r.values.ip_address_type ?? "ipv4");
+      if (ipType === "dualstack-without-public-ipv4") return known(undefined);
+      if (ipType !== "ipv4" && ipType !== "dualstack") return unknown(`${r.address}: ip_address_type ${ipType} is not modeled`);
+      return known(`${r.address} is internet-facing (internal = false)`);
+    };
+    const network = type === "network" || type === "gateway";
+    const groups = (vpc: string): Known<SecurityGroup[]> => {
+      const g = this.groups(r, "security_groups", vpc, !network);
+      return g === "empty" ? this.listenerGroup(r) : g;
+    };
+    return subnets.value.map((sub) => this.place(r, sub, publicIp, groups, "the result differs between the load balancer's subnets"));
+  }
+
+  /** Listener ports of a load balancer without security groups, as allow rules from anywhere. */
+  private listenerGroup(lb: Resource): Known<SecurityGroup[]> {
+    if (lb.values.load_balancer_type === "gateway") return unknown(`${lb.address}: Gateway Load Balancers are not modeled yet`);
+    const rules: SgRule[] = [];
+    for (const l of this.ofType("aws_lb_listener")) {
+      const target = this.optionalRefTo(l, "load_balancer_arn", "aws_lb");
+      if (!target.ok) return unknown(target.reason);
+      if (target.value !== lb.address) continue;
+      const port = num(l.values.port);
+      const proto = String(l.values.protocol ?? "").toUpperCase();
+      if (port === undefined || isUnknown(l, ["port"]) || isUnknown(l, ["protocol"])) return unknown(`${l.address}: port or protocol is unknown until apply`);
+      const protocols: RuleProtocol[] = proto === "UDP" ? ["udp"] : proto === "TCP_UDP" ? ["tcp", "udp"] : ["tcp"];
+      for (const protocol of protocols) rules.push({ protocol, ports: [[port, port]], sources: ALL_IPV4, text: `${l.address} listens on ${protocol} ${port} (${lb.address} has no security groups)` });
+    }
+    return known([{ address: `listeners of ${lb.address}`, ingress: known(rules) }]);
   }
 }

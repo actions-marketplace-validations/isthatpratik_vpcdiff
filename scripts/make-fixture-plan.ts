@@ -185,9 +185,55 @@ if (existsSync(join(fixture, "before", "main.tf"))) {
 }
 const after = plan(join(fixture, "after"), state).plan;
 after.timestamp = "2026-01-01T00:00:00Z"; // Fixed, so regenerating gives the same file.
+// Terraform lists relevant_attributes in a different order on each run.
+if (Array.isArray(after.relevant_attributes)) after.relevant_attributes = after.relevant_attributes.map((a) => JSON.stringify(a)).sort().map((a) => JSON.parse(a) as Json);
+
 // Remove the fake credentials and skip flags that fixture_override.tf added.
 const providerConfig = ((after.configuration as Obj).provider_config as Obj | undefined)?.aws as Obj | undefined;
 const providerExprs = providerConfig?.expressions as Obj | undefined;
 if (providerConfig && providerExprs) providerConfig.expressions = { region: providerExprs.region ?? null };
-writeFileSync(join(fixture, "plan.json"), JSON.stringify(after, null, 2) + "\n");
+// Plan JSON keeps sensitive values in clear text and only marks them: `X` next to
+// `X_sensitive` (before, after, values/sensitive_values), outputs with `sensitive: true`,
+// and variables declared sensitive. Redact by path, so keys and other values stay intact.
+const REDACTED = "(sensitive value removed)";
+const secrets = new Set<string>();
+const mask = (value: Json, m: Json): Json => {
+  if (m === true) {
+    if (typeof value === "string") secrets.add(value);
+    return value === null ? null : REDACTED;
+  }
+  if (Array.isArray(value) && Array.isArray(m)) return value.map((v, i) => mask(v, m[i] ?? false));
+  if (value && typeof value === "object" && !Array.isArray(value) && m && typeof m === "object" && !Array.isArray(m)) {
+    const out: Obj = { ...value };
+    for (const [k, mk] of Object.entries(m)) if (k in out) out[k] = mask(out[k] ?? null, mk);
+    return out;
+  }
+  return value;
+};
+const walk = (node: Json): Json => {
+  if (Array.isArray(node)) return node.map(walk);
+  if (!node || typeof node !== "object") return node;
+  const out: Obj = {};
+  for (const [k, v] of Object.entries(node)) out[k] = walk(v);
+  for (const k of Object.keys(out)) {
+    const m = out[`${k}_sensitive`] ?? (k === "values" ? out.sensitive_values : undefined);
+    if (m !== undefined && !k.endsWith("_sensitive")) out[k] = mask(out[k] ?? null, m);
+  }
+  if (out.sensitive === true && "value" in out) out.value = mask(out.value ?? null, true);
+  return out;
+};
+const redacted = walk(after) as Obj;
+const sensitiveVars = new Set(Object.entries((((redacted.configuration as Obj | undefined)?.root_module as Obj | undefined)?.variables as Obj | undefined) ?? {}).filter(([, v]) => (v as Obj).sensitive === true).map(([k]) => k));
+for (const [name, v] of Object.entries((redacted.variables as Obj | undefined) ?? {})) if (sensitiveVars.has(name)) (v as Obj).value = mask((v as Obj).value ?? null, true);
+// Constants in the configuration that equal a redacted value (for example a literal password).
+const scrubConstants = (node: Json): Json => {
+  if (Array.isArray(node)) return node.map(scrubConstants);
+  if (!node || typeof node !== "object") return node;
+  const out: Obj = {};
+  for (const [k, v] of Object.entries(node)) out[k] = k === "constant_value" && typeof v === "string" && secrets.has(v) ? REDACTED : scrubConstants(v);
+  return out;
+};
+redacted.configuration = scrubConstants(redacted.configuration ?? null);
+const text = JSON.stringify(redacted, null, 2);
+writeFileSync(join(fixture, "plan.json"), text + "\n");
 console.log(`Wrote ${join(fixture, "plan.json")}`);

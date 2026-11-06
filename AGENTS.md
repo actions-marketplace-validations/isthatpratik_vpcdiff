@@ -10,6 +10,19 @@ These rules apply to any AI coding agent working in this repository.
 - Use Conventional Commits (`feat:`, `fix:`, `docs:`, `test:`, `chore:`, `refactor:`).
 - Do not add `Co-Authored-By` trailers or tool attribution to commits or PRs.
 
+## Git and GitHub approval
+
+- Never commit, push, tag, or rewrite history without explicit approval from the
+  maintainer for that action. Show the diff and the commit message first, then wait.
+- Never create, edit, or delete anything on GitHub without explicit approval for
+  that action. This includes repositories, branches, pull requests, issues,
+  comments, reviews, labels, releases, workflows, and settings.
+- Approval for one action does not cover the next one.
+- Read-only operations are allowed without approval. Examples: `git status`,
+  `git log`, `git diff`, `git show`, `git fetch`, cloning a public repository to a
+  scratch folder, `gh repo view`, `gh pr view`, `gh issue list`, and `gh api` GET
+  requests.
+
 ## Engine invariants
 
 - `packages/engine` is pure. No `fs`, network, `Date.now()`, or `Math.random()`.

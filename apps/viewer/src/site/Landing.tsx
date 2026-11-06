@@ -1,8 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect } from "react";
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/litt/accordion";
 import { Tag } from "@/components/litt/tag";
 import { TooltipProvider } from "@/components/litt/tooltip";
-import { NumberFlow } from "@/components/sora-ui/texts/number-flow";
 import { TextEffect } from "@/components/sora-ui/texts/text-effect";
 import { TextLoop } from "@/components/sora-ui/texts/text-loop";
 import aws from "../logos/aws-icon-mono.svg?url";
@@ -19,61 +18,14 @@ import { PathField } from "./PathField.tsx";
 import { Footer } from "./Footer.tsx";
 import { HopStrip } from "./HopStrip.tsx";
 import { Plate } from "./Plate.tsx";
+import { Tagline } from "./Tagline.tsx";
+import { CliSection } from "./Terminal.tsx";
 import { StepTabs } from "./StepTabs.tsx";
-import { CrossCard, Divider, EASE, PAD, Rail, SectionHead, useInViewOnce } from "./rails.tsx";
+import { Divider, EASE, PAD, Rail, SectionHead, useInViewOnce } from "./rails.tsx";
 import { ScrollFrost } from "./ScrollFrost.tsx";
 import { startSmoothScroll } from "./smooth.ts";
 
 const APP = "./app/";
-
-/** The tagline: each word moves from a muted tone to full ink as it crosses the trigger line. */
-function TaglineReveal({ lines }: { lines: string[] }) {
-  const ref = useRef<HTMLParagraphElement>(null);
-  const words = lines.flatMap((line, li) => {
-    const parts = line.split(" ");
-    return parts.map((w, wi) => ({ w, key: `${li}-${wi}`, lineEnd: wi === parts.length - 1 && li < lines.length - 1 }));
-  });
-  const [lit, setLit] = useState(0);
-  useEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return setLit(words.length);
-    let frame = 0;
-    const update = () => {
-      frame = 0;
-      const trigger = window.innerHeight * 0.62;
-      let n = 0;
-      el.querySelectorAll<HTMLSpanElement>("[data-word]").forEach((s) => {
-        if (s.getBoundingClientRect().top < trigger) n++;
-      });
-      setLit((prev) => Math.max(prev, n));
-    };
-    const onScroll = () => {
-      if (!frame) frame = requestAnimationFrame(update);
-    };
-    update();
-    window.addEventListener("scroll", onScroll, { passive: true });
-    window.addEventListener("resize", onScroll);
-    return () => {
-      window.removeEventListener("scroll", onScroll);
-      window.removeEventListener("resize", onScroll);
-      if (frame) cancelAnimationFrame(frame);
-    };
-  }, [words.length]);
-  return (
-    <p ref={ref} className="mx-auto max-w-[820px] text-center font-display text-4xl leading-[1.1] font-normal tracking-[-0.035em] text-balance sm:text-6xl sm:leading-[1.04]">
-      <span className="sr-only">{lines.join(" ")}</span>
-      {words.map((x, i) => (
-        <span key={x.key} aria-hidden="true">
-          <span data-word className={`transition-colors duration-500 ${EASE} ${i < lit ? "text-litt-fg" : "text-litt-fg/20"}`}>
-            {x.w}
-          </span>
-          {x.lineEnd ? <br /> : " "}
-        </span>
-      ))}
-    </p>
-  );
-}
 
 /* ---- Feature visuals: each shows its idea working, in the product's own words. ---- */
 
@@ -82,7 +34,7 @@ const HOP_NAMES = ["Public IP", "Gateway", "NACL in", "Groups", "NACL out", "Rou
 /** The hops as a short path: squares on a line that fill in order. */
 function HopChain({ on }: { on: boolean }) {
   return (
-    <ol className="grid grid-cols-6" aria-label="The six hops, in the order traffic meets them">
+    <ol className="relative grid grid-cols-6" aria-label="The six hops, in the order traffic meets them">
       {HOP_NAMES.map((h, i) => (
         <li key={h} className="relative grid content-start justify-items-start gap-3">
           {i < HOP_NAMES.length - 1 && (
@@ -92,6 +44,14 @@ function HopChain({ on }: { on: boolean }) {
           <span className="pr-2 font-litt-mono text-litt-caption leading-tight text-litt-fg-muted">{h}</span>
         </li>
       ))}
+      {/* After the chain fills, a soft light travels it, the way a packet meets each hop in order. */}
+      <li aria-hidden="true" className="pointer-events-none absolute top-[5px] left-1.5 h-px w-[83.333%]">
+        {on && (
+          <span className="absolute inset-y-0 left-0 w-full opacity-0 motion-safe:animate-[hop-packet_4.2s_cubic-bezier(0.65,0,0.35,1)_1.6s_infinite]">
+            <span className="absolute top-1/2 -left-[3px] size-[7px] -translate-y-1/2 rounded-full bg-litt-fg shadow-[0_0_0_3px_color-mix(in_oklab,var(--litt-fg)_14%,transparent),0_0_12px_2px_color-mix(in_oklab,var(--litt-fg)_35%,transparent)]" />
+          </span>
+        )}
+      </li>
     </ol>
   );
 }
@@ -102,7 +62,7 @@ function UnknownLine() {
       <div className="flex flex-wrap items-center gap-2">
         <span className="text-litt-fg">gateway_id</span>
         <span className="text-litt-fg-subtle">=</span>
-        <span className="text-litt-fg-muted">(known after apply)</span>
+        <span className="text-litt-fg-muted motion-safe:animate-[unknown-shimmer_3.2s_linear_infinite] motion-safe:bg-[linear-gradient(90deg,var(--litt-fg-subtle)_0%,var(--litt-fg-subtle)_40%,var(--litt-fg)_50%,var(--litt-fg-subtle)_60%,var(--litt-fg-subtle)_100%)] motion-safe:bg-[length:250%_100%] motion-safe:bg-clip-text motion-safe:text-transparent">(known after apply)</span>
       </div>
       <div className="flex flex-wrap items-center gap-2">
         <Tag status="neutral">Unknown</Tag>
@@ -118,12 +78,14 @@ function OutageTimeline({ on }: { on: boolean }) {
       <div className="grid grid-cols-[1fr_1.2fr_1fr] items-center gap-2">
         <span className="border border-litt-line-strong px-2 py-1.5 text-center text-litt-fg-muted">delete</span>
         <span className="relative h-8">
-          <span className={`absolute inset-x-0 top-1/2 h-0 -translate-y-1/2 border-t border-dashed border-litt-fg transition-[clip-path] duration-1000 ${EASE}`} style={{ clipPath: on ? "inset(0 0 0 0)" : "inset(0 100% 0 0)" }} />
+          <span className={`absolute inset-x-0 top-1/2 h-px -translate-y-1/2 bg-[repeating-linear-gradient(90deg,var(--litt-fg)_0_4px,transparent_4px_8px)] transition-[clip-path] duration-1000 ${EASE} ${on ? "motion-safe:animate-[dash-march_1.6s_linear_1.2s_infinite]" : ""}`} style={{ clipPath: on ? "inset(0 0 0 0)" : "inset(0 100% 0 0)" }} />
         </span>
         <span className="border border-litt-line-strong px-2 py-1.5 text-center text-litt-fg-muted">create</span>
       </div>
       <p className={`flex items-center justify-center gap-2 font-litt-sans text-litt-small text-litt-fg transition-opacity duration-500 ${on ? "opacity-100 delay-700" : "opacity-0"}`}>
-        <span className="size-1.5 rounded-full bg-litt-warning" />
+        <span className="relative size-1.5 rounded-full bg-litt-warning">
+          {on && <span aria-hidden="true" className="absolute inset-0 rounded-full bg-litt-warning opacity-0 motion-safe:animate-[soft-ping_2.4s_cubic-bezier(0.22,1,0.36,1)_1.4s_infinite]" />}
+        </span>
         traffic can drop here
       </p>
     </div>
@@ -169,38 +131,14 @@ function Features() {
           <p className={body}>No AWS account and no credentials. The viewer runs in your browser tab, behind a policy that blocks every data request it could make.</p>
         </div>
         <div className="grid gap-2">
-          <span className="font-litt-mono text-2xl text-litt-fg sm:text-3xl">connect-src &apos;none&apos;</span>
+          <span className="font-litt-mono text-2xl text-litt-fg sm:text-3xl">
+            connect-src &apos;none&apos;
+            <span aria-hidden="true" className="ml-1 inline-block h-[0.9em] w-[0.5em] translate-y-[0.1em] bg-litt-fg/50 motion-safe:animate-[soft-caret_1.4s_ease-in-out_infinite]" />
+          </span>
           <span className="text-litt-small text-litt-fg-subtle">in the viewer's Content Security Policy</span>
         </div>
       </article>
     </div>
-  );
-}
-
-function Stats() {
-  const [ref, seen] = useInViewOnce<HTMLDListElement>();
-  const facts = [
-    { value: 6, label: "hops checked for every path, before and after the plan" },
-    { value: 5, label: "real Terraform plans in the test suite, each with a written proof" },
-    { value: 102, label: "tests on every change, with byte for byte expected results" },
-    { value: 0, label: "runtime dependencies in the engine: a terminal, CI, or a tab" },
-  ];
-  return (
-    <dl ref={ref} className="grid gap-px border-t border-litt-line bg-litt-line sm:grid-cols-2 lg:grid-cols-4">
-      {facts.map((f) => (
-        <div key={f.label} className="grid content-start gap-4 bg-litt-canvas px-6 py-10 md:px-10 md:py-12 md:first:pl-16">
-          <dt className="sr-only">
-            {f.value} {f.label}
-          </dt>
-          <dd aria-hidden="true" className="font-display text-6xl leading-none font-normal tracking-[-0.04em] text-litt-fg tabular-nums">
-            <NumberFlow value={seen ? f.value : 0} />
-          </dd>
-          <dd aria-hidden="true" className="text-litt-small text-litt-fg-muted">
-            {f.label}
-          </dd>
-        </div>
-      ))}
-    </dl>
   );
 }
 
@@ -366,22 +304,22 @@ export function Landing() {
           <SectionHead eyebrow="In review" title="The check runs on the pull request." rest="Before anyone applies." bar>
             A rule widens in a pull request. vpcdiff finds the new path from the internet and shows the hop that changed.
           </SectionHead>
-          <CrossCard>
-            <Plate inset="p-4 sm:p-10 lg:p-14">
+          <div className="border border-litt-line">
+            <Plate inset="px-4 pt-4 sm:px-10 sm:pt-10 lg:px-14 lg:pt-14">
               <div role="img" aria-label="Product demo: a pull request widens a security group rule, and vpcdiff finds and explains the new path from the internet">
                 <div aria-hidden="true">
                   <HeroDemo />
                 </div>
               </div>
             </Plate>
-          </CrossCard>
+          </div>
         </Rail>
-        <Divider />
+        <Divider dots />
 
-        <Rail label="Tagline" className="px-6 py-32 sm:py-44">
-          <TaglineReveal lines={["A diff shows which rules changed.", "vpcdiff shows what they open."]} />
+        <Rail label="Tagline">
+          <Tagline />
         </Rail>
-        <Divider />
+        <Divider dots />
 
         <Rail label="Why vpcdiff">
           <div className={`${PAD} pt-24 pb-16 md:pt-28 md:pb-20`}>
@@ -413,6 +351,16 @@ export function Landing() {
         </Rail>
         <Divider />
 
+        <Rail id="cli" label="In the terminal">
+          <div className={`${PAD} pt-24 pb-16 md:pt-28 md:pb-20`}>
+            <SectionHead eyebrow="In the terminal" title="It asks for what it needs." rest="You answer, it explains." bar>
+              The CLI finds your plan, reads it, and shows each new path in plain words. The same check runs in CI with plain text output.
+            </SectionHead>
+          </div>
+          <CliSection />
+        </Rail>
+        <Divider />
+
         <Rail label="How it is checked">
           <div className={`${PAD} pt-24 pb-16 md:pt-28 md:pb-20`}>
             <SectionHead eyebrow="Engine" title="Pure and deterministic." rest="The same plan gives the same answer, byte for byte." bar>
@@ -420,7 +368,6 @@ export function Landing() {
             </SectionHead>
           </div>
           <HopStrip />
-          <Stats />
         </Rail>
         <Divider />
 
@@ -450,8 +397,8 @@ export function Landing() {
         </Rail>
         <Divider />
 
-        <Rail id="faq" label="Questions" className={`${PAD} grid gap-12 py-24 md:py-28 lg:grid-cols-[1fr_1.4fr]`}>
-          <SectionHead eyebrow="Questions" title="Before you try it." />
+        <Rail id="faq" label="Questions" className={`${PAD} grid items-start gap-12 py-24 md:py-28 lg:grid-cols-[1fr_1.4fr]`}>
+          <SectionHead eyebrow="Questions" title="Before you try it." className="lg:sticky lg:top-24" />
           <Accordion type="single" collapsible headingLevel={3}>
             {FAQ.map((f, i) => (
               <AccordionItem key={f.q} value={`q${i}`}>

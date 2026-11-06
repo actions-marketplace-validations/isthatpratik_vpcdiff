@@ -53,14 +53,20 @@ export function Rail({ children, className = "", id, label, reveal = true, as: T
   );
 }
 
-/** An edge-to-edge hairline with a gap where it meets each rail. */
-export function Divider() {
+/**
+ * An edge-to-edge hairline with a gap where it meets each rail. With `dots`, a small dot
+ * sits in each gap. Use it only where a crossing frames something (the tagline), so most
+ * crossings stay as plain gaps.
+ */
+export function Divider({ dots = false }: { dots?: boolean }) {
+  const gap = "absolute -top-3 grid size-6 place-items-center bg-litt-canvas";
+  const dot = dots ? <span className="size-[3px] rounded-full bg-litt-fg-subtle" /> : null;
   return (
     <div aria-hidden="true" className="relative z-10 h-px">
       <div className="absolute inset-x-3 top-0 h-px bg-litt-line" />
       <div className="relative mx-3 h-px sm:mx-6 xl:mx-auto xl:max-w-[1200px]">
-        <span className="absolute -top-3 -left-3 size-6 bg-litt-canvas" />
-        <span className="absolute -top-3 -right-3 size-6 bg-litt-canvas" />
+        <span className={`${gap} -left-3`}>{dot}</span>
+        <span className={`${gap} -right-3`}>{dot}</span>
       </div>
     </div>
   );
@@ -91,23 +97,6 @@ export function SectionHead({ eyebrow, title, rest, children, bar = false, class
         {rest && <span className="text-litt-fg-subtle"> {rest}</span>}
       </h2>
       {children && <p className="max-w-[600px] text-lg leading-relaxed text-litt-fg-muted">{children}</p>}
-    </div>
-  );
-}
-
-/**
- * A card with a small cross at each corner, after cardcn's basic card #6
- * (https://cardcn.dev/cards/basic-cards). Rebuilt here on litt tokens.
- */
-export function CrossCard({ children, className = "" }: { children: ReactNode; className?: string }) {
-  const corner = "pointer-events-none absolute size-[11px] text-litt-fg-subtle before:absolute before:top-1/2 before:left-0 before:h-px before:w-full before:-translate-y-1/2 before:bg-current after:absolute after:top-0 after:left-1/2 after:h-full after:w-px after:-translate-x-1/2 after:bg-current";
-  return (
-    <div className={`relative border border-litt-line ${className}`}>
-      <span aria-hidden="true" className={`${corner} -top-[6px] -left-[6px]`} />
-      <span aria-hidden="true" className={`${corner} -top-[6px] -right-[6px]`} />
-      <span aria-hidden="true" className={`${corner} -bottom-[6px] -left-[6px]`} />
-      <span aria-hidden="true" className={`${corner} -right-[6px] -bottom-[6px]`} />
-      {children}
     </div>
   );
 }

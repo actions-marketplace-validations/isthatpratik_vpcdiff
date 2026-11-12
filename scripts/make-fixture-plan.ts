@@ -57,6 +57,9 @@ const KINDS: Record<string, [string, string]> = {
   aws_instance: ["i", "instance"],
   aws_ec2_managed_prefix_list: ["pl", "prefix-list"],
   aws_vpc_peering_connection: ["pcx", "vpc-peering-connection"],
+  aws_ec2_transit_gateway: ["tgw", "transit-gateway"],
+  aws_ec2_transit_gateway_vpc_attachment: ["tgw-attach", "transit-gateway-attachment"],
+  aws_ec2_transit_gateway_route_table: ["tgw-rtb", "transit-gateway-route-table"],
 };
 
 const cache = join(tmpdir(), TOFU ? "vpcdiff-tofu-plugin-cache" : "vpcdiff-tf-plugin-cache");
@@ -153,6 +156,8 @@ function toState(before: Obj, schemas: Obj): Obj {
         if (path.length === 1 && key === "id") return id;
         if (path.length === 1 && key === "arn") return `arn:aws:ec2:${REGION}:${ACCOUNT}:${(KINDS[type] as [string, string])[1]}/${id}`;
         if (key === "owner_id") return ACCOUNT;
+        // The default route table that AWS creates with a transit gateway (one table for both).
+        if (type === "aws_ec2_transit_gateway" && path.length === 1 && (key === "association_default_route_table_id" || key === "propagation_default_route_table_id")) return `tgw-rtb-${id.slice("tgw-".length)}`;
         if (key === "tags_all") return {};
         if (type === "aws_security_group" && path.length === 1 && key === "egress") return [];
         // Amazon-provided IPv6 blocks (documentation-style, from Amazon's 2600:1f00::/24 range).
@@ -170,9 +175,11 @@ function toState(before: Obj, schemas: Obj): Obj {
           if (g.length === 1) return g[0] as string;
           throw new Error(`${address}: cannot fill ${path.join(".")}: the block references ${g.length} resources of that kind`);
         }
-        if (key?.endsWith("_id") || key === "vpc_security_group_ids") {
+        // A list of IDs (`vpc_security_group_ids`, `subnet_ids`): every resource it references.
+        const list = path.length === 1 && key?.endsWith("_ids");
+        if (key?.endsWith("_id") || list) {
           const targets = referencedResources(refs[path[0] as string]).map((a) => ids.get(a)).filter(Boolean) as string[];
-          if (key === "vpc_security_group_ids") return targets;
+          if (list) return targets;
           if (targets.length === 1) return targets[0] as string;
         }
         return path.length === 1 && key ? emptyValue(schemas[type] as Obj | undefined, key) : null;

@@ -16,9 +16,11 @@
 // produces a real update plan, and no AWS API is called.
 
 import { execFileSync } from "node:child_process";
-import { cpSync, mkdirSync, mkdtempSync, readdirSync, writeFileSync, existsSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { cpSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { sandboxEnv } from "./sandbox-env.ts";
 
 type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 type Obj = { [key: string]: Json };
@@ -59,10 +61,21 @@ const KINDS: Record<string, [string, string]> = {
 
 const cache = join(tmpdir(), TOFU ? "vpcdiff-tofu-plugin-cache" : "vpcdiff-tf-plugin-cache");
 mkdirSync(cache, { recursive: true });
-const env = { ...process.env, TF_PLUGIN_CACHE_DIR: cache, TF_IN_AUTOMATION: "1", CHECKPOINT_DISABLE: "1" };
+// Never the caller's environment: no profile, login, or credential can reach the run.
+const env = sandboxEnv({ TF_PLUGIN_CACHE_DIR: cache });
 
 function tf(cwd: string, args: string[]): string {
   return execFileSync(BIN, args, { cwd, env, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+}
+
+/**
+ * A lock file kept from the first verified install of a set of providers. With it,
+ * `init` uses the plugin cache and still checks the provider's hash, instead of
+ * downloading the provider again for every fixture.
+ */
+function lockPath(configDir: string): string {
+  const providers = readdirSync(configDir).filter((f) => f.endsWith(".tf")).map((f) => readFileSync(join(configDir, f), "utf8")).join("\n").match(/required_providers\s*\{[^}]*\}/g) ?? [];
+  return join(cache, `lock-${createHash("sha256").update(providers.join("|")).digest("hex").slice(0, 16)}.hcl`);
 }
 
 function plan(configDir: string, state?: Obj): { plan: Obj; dir: string } {
@@ -70,7 +83,10 @@ function plan(configDir: string, state?: Obj): { plan: Obj; dir: string } {
   for (const f of readdirSync(configDir)) if (f.endsWith(".tf")) cpSync(join(configDir, f), join(dir, f));
   writeFileSync(join(dir, "fixture_override.tf"), PROVIDER_OVERRIDE);
   if (state) writeFileSync(join(dir, "terraform.tfstate"), JSON.stringify(state, null, 2));
+  const lock = lockPath(configDir);
+  if (existsSync(lock)) cpSync(lock, join(dir, ".terraform.lock.hcl"));
   tf(dir, ["init", "-input=false", "-no-color"]);
+  if (!existsSync(lock) && existsSync(join(dir, ".terraform.lock.hcl"))) cpSync(join(dir, ".terraform.lock.hcl"), lock);
   tf(dir, ["plan", "-input=false", "-no-color", "-refresh=false", "-out=tfplan"]);
   return { plan: JSON.parse(tf(dir, ["show", "-json", "tfplan"])) as Obj, dir };
 }

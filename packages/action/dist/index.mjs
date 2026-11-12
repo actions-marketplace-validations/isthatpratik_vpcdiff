@@ -3244,6 +3244,11 @@ function azureCuts(vm) {
 var RESULT_FORMAT = "0.2";
 
 // ../engine/src/index.ts
+var MAX_PATHS = 5e5;
+var MAX_SEGMENTS = 1e6;
+var MAX_PAIRS = 25e6;
+var MAX_PLAN_CHARS = 256 * 1024 * 1024;
+var isStackOverflow = (e) => e instanceof RangeError && /call stack/i.test(e.message);
 var PROTOCOLS = ["tcp", "udp"];
 var arr2 = (v) => Array.isArray(v) ? v : [];
 var MODELED = /* @__PURE__ */ new Set([
@@ -3371,7 +3376,21 @@ function notesFor(before, after) {
   }
   return [...seen.values()].toSorted((a, b) => cmp(a.resource, b.resource));
 }
-function analyze(plan) {
+function analyze(plan, limits = {}) {
+  try {
+    return analyzePlan(plan, { paths: 0, segments: 0, pairs: 0, maxPaths: limits.maxPaths ?? MAX_PATHS, maxSegments: limits.maxSegments ?? MAX_SEGMENTS, maxPairs: limits.maxPairs ?? MAX_PAIRS });
+  } catch (e) {
+    if (isStackOverflow(e)) throw new PlanError("The plan is nested too deeply to analyze.");
+    throw e;
+  }
+}
+function analyzePlan(plan, budget) {
+  const pathsOf = (spec) => {
+    const out = pathsWithin(spec, budget);
+    budget.paths += out.length;
+    if (budget.paths > budget.maxPaths) throw new PlanError(`The plan has more than ${budget.maxPaths.toLocaleString("en-US")} paths to report. Split the plan, or narrow the security group rules that connect so many resources.`);
+    return out;
+  };
   const { before, after } = parsePlan(plan);
   const epBefore = endpointsOf(before);
   const epAfter = endpointsOf(after);
@@ -3416,6 +3435,7 @@ function analyze(plan) {
   for (const from of addresses) {
     for (const to of addresses) {
       if (from === to) continue;
+      if (++budget.pairs > budget.maxPairs) throw new PlanError(`The plan has more than ${budget.maxPairs.toLocaleString("en-US")} pairs of resources to check. Split the plan.`);
       const fb = epBefore.get(from);
       const fa = epAfter.get(from);
       const tb = epBefore.get(to);
@@ -3513,7 +3533,7 @@ function unresolvedNotes(list) {
   }
   return [...byKey.values()].map((n) => ({ resource: n.resource, message: `${n.why}; paths inside the VPC to ${[...n.targets].toSorted(cmp).join(", ")} from security groups that cannot be resolved are not checked` }));
 }
-function pathsOf(spec) {
+function pathsWithin(spec, budget) {
   const out = [];
   for (const p of PROTOCOLS) {
     let run2;
@@ -3525,6 +3545,7 @@ function pathsOf(spec) {
       run2 = void 0;
     };
     for (const seg of segment(spec.candidates(p), spec.cuts)) {
+      if (++budget.segments > budget.maxSegments) throw new PlanError(`The plan needs more than ${budget.maxSegments.toLocaleString("en-US")} port checks. A security group or network ACL has far more rules than AWS allows; reduce them.`);
       const ob = spec.before(p, seg);
       const oa = spec.after(p, seg);
       if (run2 && run2.ports[1] + 1 === seg[0] && JSON.stringify([run2.before, run2.after]) === JSON.stringify([ob, oa])) run2.ports = [run2.ports[0], seg[1]];
@@ -3728,7 +3749,9 @@ async function run(env) {
   }
   let result;
   try {
-    result = withoutControls(analyze(JSON.parse(env.readFile(planPath))));
+    const text = env.readFile(planPath);
+    if (text.length > MAX_PLAN_CHARS) throw new PlanError(`the plan is larger than ${MAX_PLAN_CHARS / 1024 / 1024} MB`);
+    result = withoutControls(analyze(JSON.parse(text)));
   } catch (e) {
     const why = e instanceof SyntaxError ? "the file is not valid JSON" : e instanceof PlanError ? e.message : e.message;
     env.log(`::error::${escape(`vpcdiff: ${planPath}: ${why}`)}`);

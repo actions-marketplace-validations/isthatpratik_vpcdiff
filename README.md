@@ -71,10 +71,12 @@ Listed on the [GitHub Marketplace](https://github.com/marketplace/actions/vpcdif
 ## Quick start (CLI)
 
 ```sh
-pnpm install && pnpm build
 cd infra
-node ../packages/cli/dist/vpcdiff.mjs
+npx vpcdiff
 ```
+
+It needs Node.js 24 or later. To build it from source instead, run
+`pnpm install && pnpm build`, then `node packages/cli/dist/vpcdiff.mjs`.
 
 With no arguments, in a terminal, `vpcdiff` asks which plan to read. It finds plan JSON
 and binary plans (`tfplan`, `*.tfplan`) in the folder, converts a binary plan with
@@ -91,7 +93,7 @@ To pass a plan yourself:
 ```sh
 terraform -chdir=infra plan -out=tfplan
 terraform -chdir=infra show -json tfplan > plan.json
-node packages/cli/dist/vpcdiff.mjs plan.json
+npx vpcdiff plan.json
 ```
 
 In a terminal, the report leads with the verdict. Example for
@@ -170,6 +172,7 @@ reported as `unknown` with a reason, never as allowed or blocked by guess.
 | Resource | Status |
 |---|---|
 | `aws_vpc` (primary IPv4 CIDR), `aws_subnet` | supported |
+| Resources inside modules, and links through module outputs and inputs (`module.net.subnet_id`, `var.vpc_id`) | supported when the links lead to one resource, or to one of several instances that all give the same result; a link through a module `local` or `data`, or instances that give different results, is unknown ([details](docs/semantics/terraform-plan-json.md)) |
 | `aws_internet_gateway`, `aws_internet_gateway_attachment` | supported |
 | `aws_route_table` (inline routes), `aws_route`, `aws_route_table_association` | supported |
 | Main route table: `aws_default_route_table`, `aws_main_route_table_association`, unmanaged default | supported |
